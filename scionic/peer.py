@@ -109,10 +109,9 @@ class PeerNetwork:
         handlers = self._handlers.get(message.target, [])
         for handler in handlers:
             try:
-                if inspect.iscoroutinefunction(handler):
-                    await handler(message)
-                else:
-                    handler(message)
+                result = handler(message)
+                if inspect.isawaitable(result):
+                    await result
             except Exception as e:
                 logger.error(f"Peer handler error: {e}")
 

@@ -10,11 +10,15 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import json
+import logging
 import time
 from typing import Any, Protocol
 
 from .types import Beacon, Hop, HopStatus, IRQ, NodeID, PeerMessage, Task
+
+logger = logging.getLogger(__name__)
 
 
 class NodeHandler(Protocol):
@@ -38,8 +42,9 @@ class Node:
     """
     A graph node that processes tasks, signs hops, and manages beacons.
 
-    Wraps a NodeHandler with the SCION-graph protocol:
+    Wraps a NodeHandler with the scionic protocol:
     - Validates it's the correct hop
+    - Injects peer context into the task before processing
     - Hashes input, calls handler, hashes output
     - Signs the hop
     - Forwards to the next node (via the forwarder)
@@ -58,13 +63,15 @@ class Node:
         self.node_id = node_id
         self.handler = handler
         self.trust_domain = trust_domain
-        self.secret = secret or node_id  # Fallback to node_id as secret
+        self.secret = secret or node_id
         self.cost_per_call = cost_per_call
         self.avg_latency_ms = avg_latency_ms
         self.max_concurrency = max_concurrency
         self.current_load = 0
         self._irq_handlers: list = []
         self._peer_handlers: list = []
+        # Peer context buffer: messages received from peers, injected on next process()
+        self._peer_context: list[PeerMessage] = []
 
     def beacon(self) -> Beacon:
         """Generate this node's capability beacon."""
@@ -83,12 +90,11 @@ class Node:
         Process a task at this hop.
 
         1. Validate we're the current hop
-        2. Create the hop record
-        3. Hash the input
+        2. Inject any buffered peer context into the task
+        3. Create the hop record, hash input
         4. Call the handler
-        5. Hash the output, sign the hop
-        6. Append to task's execution trace
-        7. Advance the task
+        5. Hash output, sign the hop
+        6. Append to task's traceroute, advance
         """
         if task.current_node != self.node_id:
             raise ValueError(
@@ -96,10 +102,28 @@ class Node:
             )
 
         self.current_load += 1
+
+        # Inject buffered peer messages into task context
+        if self._peer_context:
+            peer_data = []
+            for msg in self._peer_context:
+                peer_data.append({
+                    "from": msg.source,
+                    "type": msg.message_type,
+                    "payload": msg.payload,
+                })
+            task.context[f"_peer_messages_for_{self.node_id}"] = peer_data
+            self._peer_context.clear()
+
         hop = Hop(node_id=self.node_id, status=HopStatus.IN_PROGRESS)
         hop.started_at = time.time()
 
-        # Hash input (payload + accumulated context)
+        # Check if this is a retry
+        retried_nodes = [h.node_id for h in task.hops if h.status == HopStatus.FAILED]
+        if self.node_id in retried_nodes:
+            hop.retry_of = self.node_id
+
+        # Hash input
         input_data = json.dumps(
             {"payload": str(task.payload), "context": task.context},
             sort_keys=True, default=str
@@ -110,8 +134,6 @@ class Node:
             output = await self.handler.process(task, hop)
             hop.output = output
             hop.status = HopStatus.COMPLETE
-
-            # Update task context with our output
             task.context[self.node_id] = output
 
         except Exception as e:
@@ -126,7 +148,6 @@ class Node:
         hop.output_hash = hashlib.sha256(output_data.encode()).hexdigest()[:16]
         hop.sign(self.secret)
 
-        # Append to traceroute
         task.hops.append(hop)
         task.advance()
         self.current_load -= 1
@@ -140,7 +161,7 @@ class Node:
     async def receive_irq(self, irq: IRQ) -> None:
         """Handle an incoming interrupt."""
         for handler in self._irq_handlers:
-            if asyncio.iscoroutinefunction(handler):
+            if inspect.iscoroutinefunction(handler):
                 await handler(irq)
             else:
                 handler(irq)
@@ -150,9 +171,20 @@ class Node:
         self._peer_handlers.append(handler)
 
     async def receive_peer_message(self, msg: PeerMessage) -> None:
-        """Handle a direct peer message."""
+        """
+        Handle a direct peer message.
+
+        Default behavior: buffer the message so it's injected into the
+        task context on the next process() call. Custom handlers can
+        override this by registering via on_peer_message().
+        """
+        # Always buffer for injection
+        self._peer_context.append(msg)
+        logger.debug(f"Node {self.node_id} buffered peer message from {msg.source}")
+
+        # Also call custom handlers
         for handler in self._peer_handlers:
-            if asyncio.iscoroutinefunction(handler):
+            if inspect.iscoroutinefunction(handler):
                 await handler(msg)
             else:
                 handler(msg)

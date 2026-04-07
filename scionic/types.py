@@ -14,7 +14,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
 
 # A node identifier — opaque string, unique within a topology
@@ -31,6 +31,7 @@ class HopStatus(str, Enum):
     COMPLETE = "complete"
     FAILED = "failed"
     SKIPPED = "skipped"
+    RETRIED = "retried"
 
 
 class IRQPriority(int, Enum):
@@ -48,6 +49,7 @@ class IRQType(str, Enum):
     HALT = "halt"                       # Stop all downstream processing
     CAPACITY_CHANGE = "capacity_change" # Node load/availability changed
     RESULT_READY = "result_ready"       # Async result available for pickup
+    RETRY_REQUESTED = "retry_requested" # Ask conductor to retry a hop
 
 
 @dataclass
@@ -62,7 +64,6 @@ class TrustDomain:
     id: str
     name: str
     description: str = ""
-    # Nodes are allowed to peer with these other domains
     allowed_peers: list[str] = field(default_factory=list)
 
     def allows_peer(self, other_domain_id: str) -> bool:
@@ -79,14 +80,14 @@ class Beacon:
     Beacons expire after `ttl_seconds`.
     """
     node_id: NodeID
-    capabilities: list[str]          # What this node can do: ["search", "summarize", "code"]
-    trust_domain: str                # Which ISD this node belongs to
-    cost_per_call: float = 0.0       # Estimated cost in dollars
-    avg_latency_ms: float = 0.0      # Average processing time
-    max_concurrency: int = 1         # How many tasks it can handle in parallel
-    current_load: int = 0            # How many tasks it's currently processing
-    metadata: dict[str, Any] = field(default_factory=dict)  # Adapter-specific data
-    ttl_seconds: float = 60.0        # How long this beacon is valid
+    capabilities: list[str]
+    trust_domain: str
+    cost_per_call: float = 0.0
+    avg_latency_ms: float = 0.0
+    max_concurrency: int = 1
+    current_load: int = 0
+    metadata: dict[str, Any] = field(default_factory=dict)
+    ttl_seconds: float = 60.0
     timestamp: float = field(default_factory=time.time)
 
     @property
@@ -112,15 +113,16 @@ class Hop:
     """
     node_id: NodeID
     status: HopStatus = HopStatus.PENDING
-    input_hash: str = ""             # Hash of what this node received
-    output_hash: str = ""            # Hash of what this node produced
-    output: Any = None               # The actual output (can be large)
-    signature: str = ""              # HMAC proving this node processed the task
+    input_hash: str = ""
+    output_hash: str = ""
+    output: Any = None
+    signature: str = ""
     started_at: float = 0.0
     completed_at: float = 0.0
-    tokens_used: int = 0             # LLM tokens consumed (if applicable)
-    cost: float = 0.0                # Actual cost incurred
-    error: str = ""                  # Error message if failed
+    tokens_used: int = 0
+    cost: float = 0.0
+    error: str = ""
+    retry_of: Optional[str] = None  # node_id of the hop this retried
     metadata: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -155,15 +157,16 @@ class Task:
     The hops list grows as the task traverses the graph — a live traceroute.
     """
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
-    payload: Any = None              # The actual work to be done
-    path: Path = field(default_factory=list)         # Ordered route through nodes
-    current_hop_index: int = 0       # Which node should process next
-    hops: list[Hop] = field(default_factory=list)    # Execution trace (traceroute)
-    trust_domain: str = ""           # Which ISD this task belongs to
-    policy: dict[str, Any] = field(default_factory=dict)  # Path selection constraints
-    context: dict[str, Any] = field(default_factory=dict)  # Accumulated context from hops
-    irq_mask: list[IRQPriority] = field(default_factory=list)  # Masked interrupt levels
+    payload: Any = None
+    path: Path = field(default_factory=list)
+    current_hop_index: int = 0
+    hops: list[Hop] = field(default_factory=list)
+    trust_domain: str = ""
+    policy: dict[str, Any] = field(default_factory=dict)
+    context: dict[str, Any] = field(default_factory=dict)
+    irq_mask: list[IRQPriority] = field(default_factory=list)
     created_at: float = field(default_factory=time.time)
+    max_retries: int = 1
     metadata: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -187,9 +190,26 @@ class Task:
     def failed_hops(self) -> list[Hop]:
         return [h for h in self.hops if h.status == HopStatus.FAILED]
 
+    @property
+    def retry_count(self) -> int:
+        return sum(1 for h in self.hops if h.retry_of is not None)
+
     def advance(self) -> None:
         """Move to the next hop."""
         self.current_hop_index += 1
+
+    def rewind(self, steps: int = 1) -> None:
+        """Move back N hops (for retry)."""
+        self.current_hop_index = max(0, self.current_hop_index - steps)
+
+    def inject_feedback(self, node_id: str, feedback: str) -> None:
+        """Inject feedback into context for a node to see on retry."""
+        key = f"_feedback_for_{node_id}"
+        existing = self.context.get(key, "")
+        if existing:
+            self.context[key] = f"{existing}\n{feedback}"
+        else:
+            self.context[key] = feedback
 
     def traceroute(self) -> str:
         """Human-readable execution trace."""
@@ -201,8 +221,11 @@ class Task:
                 HopStatus.IN_PROGRESS: ">",
                 HopStatus.SKIPPED: "-",
                 HopStatus.PENDING: ".",
+                HopStatus.RETRIED: "R",
             }.get(hop.status, "?")
             line = f"  [{status_icon}] {i+1}. {hop.node_id}"
+            if hop.retry_of:
+                line += " (retry)"
             if hop.duration_ms:
                 line += f" ({hop.duration_ms:.0f}ms"
                 if hop.tokens_used:
@@ -214,9 +237,10 @@ class Task:
                 line += f" ERROR: {hop.error}"
             lines.append(line)
         if not self.is_complete and self.current_node:
-            lines.append(f"  [>] {len(self.hops)+1}. {self.current_node} (next)")
-            for node_id in self.path[self.current_hop_index + 1:]:
-                lines.append(f"  [.] {self.path.index(node_id)+1}. {node_id} (pending)")
+            remaining_idx = self.current_hop_index
+            for j, node_id in enumerate(self.path[remaining_idx:]):
+                marker = ">" if j == 0 else "."
+                lines.append(f"  [{marker}] {len(self.hops)+j+1}. {node_id} (pending)")
         return "\n".join(lines)
 
 
@@ -224,20 +248,16 @@ class Task:
 class IRQ:
     """
     Interrupt signal — async notification propagated across the graph.
-
-    Any node can fire an IRQ. The conductor decides whether to mask it
-    (based on priority) or propagate it to other nodes on the path.
-    Maps to the creative "IRQ loops informing agents across the graph" concept.
     """
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
-    source: NodeID = ""              # Who fired the interrupt
-    target: Optional[NodeID] = None  # Specific target, or None for broadcast
-    task_id: str = ""                # Which task this relates to
+    source: NodeID = ""
+    target: Optional[NodeID] = None
+    task_id: str = ""
     irq_type: IRQType = IRQType.CONTEXT_UPDATE
     priority: IRQPriority = IRQPriority.NORMAL
-    payload: Any = None              # The interrupt data
-    reason: str = ""                 # Human-readable explanation
-    suggested_action: str = ""       # What the sender thinks should happen
+    payload: Any = None
+    reason: str = ""
+    suggested_action: str = ""
     timestamp: float = field(default_factory=time.time)
 
     @property
@@ -245,7 +265,6 @@ class IRQ:
         return self.irq_type == IRQType.HALT or self.priority == IRQPriority.CRITICAL
 
     def should_deliver(self, mask: list[IRQPriority]) -> bool:
-        """Check if this IRQ should be delivered given a priority mask."""
         return self.priority not in mask
 
 
@@ -253,31 +272,28 @@ class IRQ:
 class PeerMessage:
     """
     Direct node-to-node message that bypasses the conductor.
-
-    Like SCION peering links — lateral communication between nodes
-    that share a peering relationship. The conductor doesn't see these.
     """
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     source: NodeID = ""
     target: NodeID = ""
-    task_id: str = ""                # Context: which task this relates to
+    task_id: str = ""
     payload: Any = None
-    message_type: str = "context"    # "context", "hint", "correction", "data"
+    message_type: str = "context"
     timestamp: float = field(default_factory=time.time)
 
 
 @dataclass
 class PathPolicy:
     """
-    Constraints for path selection — what the caller cares about.
-
-    The PathSelector uses these to rank candidate paths assembled from beacons.
+    Constraints for path selection.
     """
-    max_cost: Optional[float] = None          # Total budget in dollars
-    max_latency_ms: Optional[float] = None    # Max acceptable end-to-end latency
+    max_cost: Optional[float] = None
+    max_latency_ms: Optional[float] = None
     required_capabilities: list[str] = field(default_factory=list)
     preferred_trust_domains: list[str] = field(default_factory=list)
     excluded_nodes: list[NodeID] = field(default_factory=list)
-    min_path_diversity: int = 1               # Minimum distinct paths to return
+    excluded_trust_domains: list[str] = field(default_factory=list)
+    min_path_diversity: int = 1
     prefer_low_cost: bool = False
     prefer_low_latency: bool = True
+    require_same_trust_domain: bool = False

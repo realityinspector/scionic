@@ -82,17 +82,17 @@ class IRQBus:
 
         delivered = 0
 
-        # Check task-level mask
+        # Deliver to global handlers (conductor) — always, even if masked
+        for handler in self._global_handlers:
+            await self._deliver(handler, irq)
+            delivered += 1
+
+        # Check task-level mask (after global handlers)
         if task and irq.task_id:
             masked = self._masks.get(irq.task_id, set())
             if irq.priority in masked and irq.priority != IRQPriority.CRITICAL:
                 logger.debug(f"IRQ {irq.id[:8]} masked for task {irq.task_id[:8]}")
-                return 0
-
-        # Deliver to global handlers (conductor) — always
-        for handler in self._global_handlers:
-            await self._deliver(handler, irq)
-            delivered += 1
+                return delivered  # Only global handlers got it
 
         # Deliver to specific target
         if irq.target:
@@ -117,10 +117,9 @@ class IRQBus:
     async def _deliver(self, handler: IRQHandler, irq: IRQ) -> None:
         """Deliver an IRQ to a handler, handling both sync and async."""
         try:
-            if inspect.iscoroutinefunction(handler):
-                await handler(irq)
-            else:
-                handler(irq)
+            result = handler(irq)
+            if inspect.isawaitable(result):
+                await result
         except Exception as e:
             logger.error(f"IRQ handler error: {e}")
 
