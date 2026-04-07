@@ -42,7 +42,7 @@ class RoutingRule:
     name: str
     description: str
     match: Callable[[dict], Optional[list[NodeID]]]
-    priority: int = 0  # Lower = evaluated first
+    priority: int = 0  # Lower number = evaluated first (10 before 20 before 100)
 
     def __repr__(self) -> str:
         return f"RoutingRule({self.name!r}, priority={self.priority})"
