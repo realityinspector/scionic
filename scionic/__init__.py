@@ -6,7 +6,7 @@ and any domain where messages traverse a graph with sender-chosen,
 cryptographically verified, multi-path routing.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 from .types import (
     Task,
@@ -29,6 +29,8 @@ from .irq_bus import IRQBus
 from .peer import PeerLink, PeerNetwork
 from .conductor import Conductor
 from .smart_conductor import SmartConductor
+from .triage_router import TriageRouter
+from .flow import FlowController, CircuitBreaker, CircuitState, NodePressure
 from .node import Node, NodeHandler
 
 __all__ = [
@@ -36,5 +38,7 @@ __all__ = [
     "PathPolicy", "NodeID", "Path", "IRQPriority", "IRQType", "HopStatus",
     "BeaconRegistry", "PathSelector", "TaskForwarder",
     "IRQBus", "PeerLink", "PeerNetwork",
-    "Conductor", "SmartConductor", "Node", "NodeHandler",
+    "Conductor", "SmartConductor", "TriageRouter",
+    "FlowController", "CircuitBreaker", "CircuitState", "NodePressure",
+    "Node", "NodeHandler",
 ]

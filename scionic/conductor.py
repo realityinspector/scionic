@@ -318,6 +318,63 @@ class Conductor:
 
         return result
 
+    # ── Batch execution ────────────────────────────────────────────
+
+    async def execute_batch(
+        self,
+        tasks: list[Task],
+        concurrency: int = 3,
+        timeout_per_task: Optional[float] = None,
+    ) -> list[Task]:
+        """
+        Execute multiple tasks concurrently with a semaphore.
+
+        Args:
+            tasks: List of tasks to execute
+            concurrency: Max tasks running simultaneously
+            timeout_per_task: Per-task timeout in seconds (None = no timeout)
+        """
+        semaphore = asyncio.Semaphore(concurrency)
+
+        async def run_one(task: Task) -> Task:
+            async with semaphore:
+                if timeout_per_task:
+                    try:
+                        return await asyncio.wait_for(
+                            self.execute(task), timeout=timeout_per_task
+                        )
+                    except asyncio.TimeoutError:
+                        from .types import Hop
+                        timeout_hop = Hop(
+                            node_id=task.current_node or "unknown",
+                            status=HopStatus.FAILED,
+                            error=f"Pipeline timeout after {timeout_per_task}s",
+                        )
+                        task.hops.append(timeout_hop)
+                        return task
+                return await self.execute(task)
+
+        results = await asyncio.gather(
+            *(run_one(t) for t in tasks),
+            return_exceptions=True,
+        )
+
+        completed = []
+        for r in results:
+            if isinstance(r, Task):
+                completed.append(r)
+            elif isinstance(r, Exception):
+                logger.error(f"Batch task exception: {r}")
+                # Create a failed task placeholder
+                failed = Task(payload="(exception)")
+                failed.hops.append(Hop(
+                    node_id="batch",
+                    status=HopStatus.FAILED,
+                    error=str(r),
+                ))
+                completed.append(failed)
+        return completed
+
     # ── Multi-path ───────────────────────────────────────────────────
 
     async def execute_multipath(

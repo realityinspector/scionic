@@ -104,6 +104,7 @@ class Node:
         self.current_load += 1
 
         # Inject buffered peer messages into task context
+        peer_count = 0
         if self._peer_context:
             peer_data = []
             for msg in self._peer_context:
@@ -113,9 +114,11 @@ class Node:
                     "payload": msg.payload,
                 })
             task.context[f"_peer_messages_for_{self.node_id}"] = peer_data
+            peer_count = len(self._peer_context)
             self._peer_context.clear()
 
         hop = Hop(node_id=self.node_id, status=HopStatus.IN_PROGRESS)
+        hop.peer_messages_received = peer_count
         hop.started_at = time.time()
 
         # Check if this is a retry

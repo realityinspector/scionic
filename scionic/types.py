@@ -123,6 +123,7 @@ class Hop:
     cost: float = 0.0
     error: str = ""
     retry_of: Optional[str] = None  # node_id of the hop this retried
+    peer_messages_received: int = 0  # count of peer messages injected before this hop
     metadata: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -226,6 +227,8 @@ class Task:
             line = f"  [{status_icon}] {i+1}. {hop.node_id}"
             if hop.retry_of:
                 line += " (retry)"
+            if hop.peer_messages_received:
+                line += f" [+{hop.peer_messages_received} peer]"
             if hop.duration_ms:
                 line += f" ({hop.duration_ms:.0f}ms"
                 if hop.tokens_used:

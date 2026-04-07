@@ -1,11 +1,11 @@
 [build-system]
 requires = ["setuptools>=68.0"]
-build-backend = "setuptools.backends._legacy:_Backend"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "scionic"
-version = "0.1.0"
-description = "Path-aware graph execution middleware. SCION-inspired routing for agent orchestration."
+version = "0.2.0"
+description = "SCION-inspired path-aware graph execution middleware for agent orchestration."
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
