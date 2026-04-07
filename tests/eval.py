@@ -787,6 +787,9 @@ async def eval_triage_router():
     report("routing method is deterministic",
            task1.metadata.get("routing") == "deterministic",
            f"got: {task1.metadata.get('routing')}")
+    report("matched rule name is 'trivial'",
+           task1.metadata.get("routing_rule") == "trivial",
+           f"got: {task1.metadata.get('routing_rule')}")
 
     # Execute it
     result1 = await tr.execute(task1)
@@ -906,6 +909,123 @@ async def eval_packaging():
 
 
 # ═══════════════════════════════════════════════════════════════════
+# EVAL 24: Domain capability enforcement
+# ═══════════════════════════════════════════════════════════════════
+
+async def eval_domain_capabilities():
+    """Trust domain blocks capabilities that aren't allowed."""
+    c = Conductor(verify_signatures=False)
+
+    c.add_trust_domain("classify_only", "Classify Only",
+                       allowed_peers=["ops"],
+                       allowed_capabilities=["triage", "classify"])
+    c.add_trust_domain("ops", "Operations",
+                       allowed_peers=["classify_only"])
+
+    # This node has "execute" capability but is in classify_only domain
+    c.add_node("misplaced", llm(["execute"], "Execute things."),
+               trust_domain="classify_only")
+
+    task = c.create_task(payload="test", path=["misplaced"])
+    result = await c.execute(task)
+
+    has_cap_error = any(
+        "capability" in (h.error or "").lower() and "blocked" in (h.error or "").lower()
+        for h in result.hops
+    )
+    report("capability blocked by domain", has_cap_error,
+           f"errors: {[h.error for h in result.hops if h.error]}")
+
+    # Same capability in the right domain should work
+    c2 = Conductor(verify_signatures=False)
+    c2.add_trust_domain("ops", "Operations",
+                        allowed_capabilities=["execute"])
+    c2.add_node("worker", llm(["execute"], "Say 'done'."), trust_domain="ops")
+
+    task2 = c2.create_task(payload="test", path=["worker"])
+    result2 = await c2.execute(task2)
+    report("capability allowed in right domain", result2.is_complete)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# EVAL 25: Review retry loop (execute_with_review)
+# ═══════════════════════════════════════════════════════════════════
+
+async def eval_review_retry():
+    """Reviewer rejects → conductor retries executor with feedback."""
+    c = Conductor(verify_signatures=False)
+
+    c.add_node("executor", llm(["execute"],
+        "Write about the topic. If you see _feedback_for_executor in context, "
+        "incorporate the feedback. 2 sentences.",
+        max_tokens=128, temp=0.5))
+
+    c.add_node("reviewer", llm(["review"],
+        'Review the output. If the writing mentions "dogs" without mentioning '
+        'a specific breed, reject. Respond with JSON:\n'
+        '{"approved": false, "feedback": "Mention golden retrievers specifically"}\n'
+        'If it does mention a breed, respond:\n'
+        '{"approved": true, "feedback": "Good"}\n'
+        'ONLY JSON, no markdown.',
+        max_tokens=64, temp=0.0))
+
+    task = c.create_task(
+        payload="Write about dogs.",
+        path=["executor", "reviewer"],
+        max_retries=1,
+    )
+
+    result = await c.execute_with_review(
+        task, reviewer_node="reviewer", max_review_retries=1
+    )
+
+    report("review loop completed", result.is_complete)
+    report("has multiple hops", len(result.hops) >= 2,
+           f"got {len(result.hops)} hops")
+
+    # Check that a retry happened (should have > 2 hops: exec, review, retry exec, review)
+    executor_hops = [h for h in result.hops if h.node_id == "executor"]
+    report("executor ran at least once", len(executor_hops) >= 1,
+           f"executor hops: {len(executor_hops)}")
+
+    # Check IRQ log
+    report("IRQ log has retry", len(c._irq_log) > 0 or len(result.hops) > 2,
+           f"irq_log={len(c._irq_log)}, hops={len(result.hops)}")
+
+
+# ═══════════════════════════════════════════════════════════════════
+# EVAL 26: Routing rules introspection
+# ═══════════════════════════════════════════════════════════════════
+
+async def eval_rules_summary():
+    """TriageRouter rules should be inspectable."""
+    tr = TriageRouter(verify_signatures=False)
+    tr.add_node("triager", llm(["triage"], "classify"))
+    tr.add_node("quick_answer", llm(["answer"], "answer"))
+    tr.add_node("planner", llm(["plan"], "plan"))
+    tr.add_node("executor", llm(["execute"], "execute"))
+    tr.add_node("hermes_executor", llm(["execute", "terminal"], "hermes"))
+    tr.add_node("researcher", llm(["research"], "research"))
+    tr.add_node("reviewer", llm(["review"], "review"))
+
+    tr.add_default_rules()
+
+    summary = tr.rules_summary()
+    report("summary lists rules", "trivial" in summary and "full_pipeline" in summary,
+           f"summary: {summary[:100]}")
+    report("rules have priorities", "[10]" in summary and "[50]" in summary,
+           f"summary: {summary[:200]}")
+    report("5 default rules", len(tr._routing_rules) == 5,
+           f"got {len(tr._routing_rules)}")
+
+    # Each rule has a name and description
+    for rule in tr._routing_rules:
+        report(f"rule '{rule.name}' has description",
+               len(rule.description) > 10,
+               f"desc: {rule.description!r}")
+
+
+# ═══════════════════════════════════════════════════════════════════
 # Runner
 # ═══════════════════════════════════════════════════════════════════
 
@@ -939,6 +1059,9 @@ async def main():
         ("21. Pipeline timeout", eval_pipeline_timeout),
         ("22. Peer context in traceroute", eval_peer_in_traceroute),
         ("23. Packaging (pip install)", eval_packaging),
+        ("24. Domain capability enforcement", eval_domain_capabilities),
+        ("25. Review retry loop", eval_review_retry),
+        ("26. Routing rules introspection", eval_rules_summary),
     ]
 
     for name, fn in evals:

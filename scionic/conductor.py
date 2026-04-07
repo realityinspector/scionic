@@ -131,13 +131,17 @@ class Conductor:
         name: str,
         description: str = "",
         allowed_peers: Optional[list[str]] = None,
+        allowed_capabilities: Optional[list[str]] = None,
+        blocked_capabilities: Optional[list[str]] = None,
     ) -> TrustDomain:
-        """Register a trust domain (ISD)."""
+        """Register a trust domain (ISD) with optional capability restrictions."""
         domain = TrustDomain(
             id=domain_id,
             name=name,
             description=description,
             allowed_peers=allowed_peers or [],
+            allowed_capabilities=allowed_capabilities or [],
+            blocked_capabilities=blocked_capabilities or [],
         )
         self._trust_domains[domain_id] = domain
         self.forwarder.register_trust_domain(domain)
@@ -317,6 +321,83 @@ class Conductor:
             retries += 1
 
         return result
+
+    async def execute_with_review(
+        self,
+        task: Task,
+        reviewer_node: str = "reviewer",
+        executor_node: Optional[str] = None,
+        max_review_retries: int = 1,
+    ) -> Task:
+        """
+        Execute a task and auto-retry if the reviewer rejects.
+
+        The reviewer is expected to return JSON with {"approved": bool, "feedback": str}.
+        If rejected, fires an IRQ and re-executes the executor with feedback injected.
+
+        Args:
+            task: The task to execute
+            reviewer_node: Node ID of the reviewer
+            executor_node: Node ID to retry on rejection (auto-detected if None)
+            max_review_retries: Maximum review→retry cycles
+        """
+        result = await self.execute(task)
+        retries = 0
+
+        while retries < max_review_retries:
+            reviewer_output = str(result.context.get(reviewer_node, ""))
+            if not reviewer_output:
+                break
+
+            # Parse reviewer JSON
+            review_data = self._parse_review(reviewer_output)
+            if review_data is None or review_data.get("approved", True):
+                break  # Approved or unparseable — accept
+
+            feedback = review_data.get("feedback", "Review rejected, please improve.")
+            logger.info(f"Reviewer rejected: {feedback}")
+
+            # Find the executor to retry (node before reviewer)
+            target = executor_node
+            if not target and reviewer_node in result.path:
+                rev_idx = result.path.index(reviewer_node)
+                if rev_idx > 0:
+                    target = result.path[rev_idx - 1]
+
+            if not target:
+                break  # Can't determine which node to retry
+
+            # Fire IRQ and retry
+            await self.request_retry(
+                task=result,
+                source=reviewer_node,
+                target=target,
+                feedback=feedback,
+            )
+            result = await self.execute_with_retry(result)
+            retries += 1
+
+        return result
+
+    def _parse_review(self, raw: str) -> Optional[dict]:
+        """Parse reviewer JSON output, resilient to markdown fences."""
+        import json
+        import re
+        clean = raw.strip()
+        if clean.startswith("```"):
+            lines = clean.split("\n")
+            lines = [l for l in lines[1:] if l.strip() != "```"]
+            clean = "\n".join(lines).strip()
+        try:
+            return json.loads(clean)
+        except json.JSONDecodeError:
+            match = re.search(r'\{[^{}]*\}', clean, re.DOTALL)
+            if match:
+                try:
+                    return json.loads(match.group())
+                except json.JSONDecodeError:
+                    pass
+        return None
 
     # ── Batch execution ────────────────────────────────────────────
 

@@ -67,6 +67,24 @@ class TaskForwarder:
 
         return False
 
+    def _check_domain_capabilities(self, node: Node) -> Optional[str]:
+        """
+        Check if a node's capabilities are allowed by its trust domain.
+
+        Returns an error message if blocked, None if allowed.
+        """
+        domain = self._trust_domains.get(node.trust_domain)
+        if not domain:
+            return None  # No domain registered = no restrictions
+
+        for cap in node.handler.capabilities():
+            if not domain.allows_capability(cap):
+                return (
+                    f"Capability '{cap}' blocked in trust domain "
+                    f"'{domain.name}' ({domain.id})"
+                )
+        return None
+
     def _verify_last_hop(self, task: Task) -> bool:
         """Verify the signature of the most recent hop."""
         if not task.hops:
@@ -106,6 +124,18 @@ class TaskForwarder:
                     node_id=current,
                     status=HopStatus.FAILED,
                     error=f"Node {current} not found in forwarder",
+                )
+                task.hops.append(error_hop)
+                break
+
+            # Check domain capability restrictions
+            cap_error = self._check_domain_capabilities(node)
+            if cap_error:
+                logger.error(f"Capability restriction: {cap_error}")
+                error_hop = Hop(
+                    node_id=current,
+                    status=HopStatus.FAILED,
+                    error=cap_error,
                 )
                 task.hops.append(error_hop)
                 break

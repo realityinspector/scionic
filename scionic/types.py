@@ -60,14 +60,31 @@ class TrustDomain:
     Nodes in the same trust domain can peer freely.
     Cross-domain traffic requires explicit policy.
     Failures in one domain don't cascade to others.
+
+    Capability restrictions: each domain can declare which capabilities
+    are allowed and which are blocked. A node in the "triage" domain
+    with allowed_capabilities=["triage","classify"] cannot run "execute"
+    even if the node handler advertises it.
     """
     id: str
     name: str
     description: str = ""
     allowed_peers: list[str] = field(default_factory=list)
+    # If set, only these capabilities can be used by nodes in this domain
+    allowed_capabilities: list[str] = field(default_factory=list)
+    # These capabilities are explicitly blocked in this domain
+    blocked_capabilities: list[str] = field(default_factory=list)
 
     def allows_peer(self, other_domain_id: str) -> bool:
         return other_domain_id == self.id or other_domain_id in self.allowed_peers
+
+    def allows_capability(self, capability: str) -> bool:
+        """Check if a capability is allowed in this domain."""
+        if self.blocked_capabilities and capability in self.blocked_capabilities:
+            return False
+        if self.allowed_capabilities:
+            return capability in self.allowed_capabilities
+        return True  # No restrictions = everything allowed
 
 
 @dataclass

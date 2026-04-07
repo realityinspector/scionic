@@ -29,7 +29,7 @@ from .irq_bus import IRQBus
 from .peer import PeerLink, PeerNetwork
 from .conductor import Conductor
 from .smart_conductor import SmartConductor
-from .triage_router import TriageRouter
+from .triage_router import TriageRouter, RoutingRule
 from .flow import FlowController, CircuitBreaker, CircuitState, NodePressure
 from .node import Node, NodeHandler
 
@@ -38,7 +38,7 @@ __all__ = [
     "PathPolicy", "NodeID", "Path", "IRQPriority", "IRQType", "HopStatus",
     "BeaconRegistry", "PathSelector", "TaskForwarder",
     "IRQBus", "PeerLink", "PeerNetwork",
-    "Conductor", "SmartConductor", "TriageRouter",
+    "Conductor", "SmartConductor", "TriageRouter", "RoutingRule",
     "FlowController", "CircuitBreaker", "CircuitState", "NodePressure",
     "Node", "NodeHandler",
 ]

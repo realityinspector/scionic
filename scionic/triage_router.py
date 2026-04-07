@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
 from .conductor import Conductor
@@ -29,8 +30,22 @@ from .types import HopStatus, NodeID, PathPolicy, Task
 
 logger = logging.getLogger(__name__)
 
-# Type for routing rules: triage_data → path
-RoutingRule = Callable[[dict], Optional[list[NodeID]]]
+@dataclass
+class RoutingRule:
+    """
+    A named routing rule with a match function.
+
+    Rules are evaluated in priority order. First match wins.
+    The match function takes triage_data (dict) and returns a
+    path (list[NodeID]) if it matches, or None if it doesn't.
+    """
+    name: str
+    description: str
+    match: Callable[[dict], Optional[list[NodeID]]]
+    priority: int = 0  # Lower = evaluated first
+
+    def __repr__(self) -> str:
+        return f"RoutingRule({self.name!r}, priority={self.priority})"
 
 
 class TriageRouter(Conductor):
@@ -84,68 +99,113 @@ class TriageRouter(Conductor):
 
     def add_routing_rule(self, rule: RoutingRule) -> None:
         """
-        Add a routing rule function.
+        Add a named routing rule.
 
-        A rule takes triage_data (dict) and returns a path (list[NodeID])
-        or None if it doesn't match. Rules are evaluated in order.
+        Rules are evaluated in priority order (lower = first).
         First match wins.
 
         Example:
-            def simple_facts(triage):
-                if triage.get("complexity") == "trivial":
-                    return ["quick_answer"]
-                return None
-
-            router.add_routing_rule(simple_facts)
+            router.add_routing_rule(RoutingRule(
+                name="simple_facts",
+                description="Trivial questions → quick_answer",
+                match=lambda t: ["quick_answer"] if t.get("complexity") == "trivial" else None,
+                priority=10,
+            ))
         """
         self._routing_rules.append(rule)
+        self._routing_rules.sort(key=lambda r: r.priority)
 
     def add_default_rules(self) -> None:
         """
         Add sensible default routing rules.
 
-        These cover the common patterns. Override or extend for your domain.
+        Rules and their match conditions (fully visible):
+
+        1. trivial (p=10): complexity=trivial|simple → quick_answer
+           (or hermes_executor if needs_tools)
+        2. code (p=20): needs_code|needs_tools|needs_terminal
+           → planner → hermes_executor → reviewer
+        3. research_only (p=30): needs_research AND NOT needs_planning
+           → researcher → executor → reviewer
+        4. planning_only (p=40): needs_planning AND NOT needs_research
+           → planner → executor|hermes_executor → reviewer
+        5. full_pipeline (p=50): needs_planning AND needs_research
+           → planner → researcher → executor|hermes_executor → reviewer
         """
-        def trivial_route(t: dict) -> Optional[list[NodeID]]:
-            if t.get("complexity") in ("trivial", "simple"):
-                if t.get("needs_tools") or t.get("needs_terminal"):
-                    return self._pick_with_flow(["hermes_executor"])
-                return self._pick_with_flow(["quick_answer"])
-            return None
-
-        def research_route(t: dict) -> Optional[list[NodeID]]:
-            if t.get("needs_research") and not t.get("needs_planning"):
-                base = ["researcher", "executor", "reviewer"]
-                return self._pick_with_flow(base)
-            return None
-
-        def planning_route(t: dict) -> Optional[list[NodeID]]:
-            if t.get("needs_planning") and not t.get("needs_research"):
-                executor = "hermes_executor" if t.get("needs_tools") else "executor"
-                base = ["planner", executor, "reviewer"]
-                return self._pick_with_flow(base)
-            return None
-
-        def full_route(t: dict) -> Optional[list[NodeID]]:
-            if t.get("needs_planning") and t.get("needs_research"):
-                executor = "hermes_executor" if t.get("needs_tools") else "executor"
-                base = ["planner", "researcher", executor, "reviewer"]
-                return self._pick_with_flow(base)
-            return None
-
-        def code_route(t: dict) -> Optional[list[NodeID]]:
-            if t.get("needs_code") or t.get("needs_tools") or t.get("needs_terminal"):
-                base = ["planner", "hermes_executor", "reviewer"]
-                return self._pick_with_flow(base)
-            return None
+        router = self
 
         self._routing_rules = [
-            trivial_route,
-            code_route,
-            research_route,
-            planning_route,
-            full_route,
+            RoutingRule(
+                name="trivial",
+                description="Simple/trivial tasks → quick_answer (or hermes for tools)",
+                priority=10,
+                match=lambda t: (
+                    router._pick_with_flow(["hermes_executor"])
+                    if t.get("complexity") in ("trivial", "simple")
+                    and (t.get("needs_tools") or t.get("needs_terminal"))
+                    else router._pick_with_flow(["quick_answer"])
+                    if t.get("complexity") in ("trivial", "simple")
+                    else None
+                ),
+            ),
+            RoutingRule(
+                name="code",
+                description="Code/terminal tasks → planner → hermes_executor → reviewer",
+                priority=20,
+                match=lambda t: (
+                    router._pick_with_flow(["planner", "hermes_executor", "reviewer"])
+                    if t.get("needs_code") or t.get("needs_tools") or t.get("needs_terminal")
+                    else None
+                ),
+            ),
+            RoutingRule(
+                name="research_only",
+                description="Research (no planning) → researcher → executor → reviewer",
+                priority=30,
+                match=lambda t: (
+                    router._pick_with_flow(["researcher", "executor", "reviewer"])
+                    if t.get("needs_research") and not t.get("needs_planning")
+                    else None
+                ),
+            ),
+            RoutingRule(
+                name="planning_only",
+                description="Planning (no research) → planner → executor → reviewer",
+                priority=40,
+                match=lambda t: (
+                    router._pick_with_flow([
+                        "planner",
+                        "hermes_executor" if t.get("needs_tools") else "executor",
+                        "reviewer",
+                    ])
+                    if t.get("needs_planning") and not t.get("needs_research")
+                    else None
+                ),
+            ),
+            RoutingRule(
+                name="full_pipeline",
+                description="Complex (plan+research) → planner → researcher → executor → reviewer",
+                priority=50,
+                match=lambda t: (
+                    router._pick_with_flow([
+                        "planner", "researcher",
+                        "hermes_executor" if t.get("needs_tools") else "executor",
+                        "reviewer",
+                    ])
+                    if t.get("needs_planning") and t.get("needs_research")
+                    else None
+                ),
+            ),
         ]
+
+    def rules_summary(self) -> str:
+        """Human-readable summary of active routing rules."""
+        if not self._routing_rules:
+            return "No routing rules configured."
+        lines = ["Routing rules (evaluated in priority order):"]
+        for rule in self._routing_rules:
+            lines.append(f"  [{rule.priority:2d}] {rule.name}: {rule.description}")
+        return "\n".join(lines)
 
     def _pick_with_flow(self, path: list[NodeID]) -> Optional[list[NodeID]]:
         """
@@ -236,15 +296,18 @@ class TriageRouter(Conductor):
         # Step 2: Try routing rules
         if triage_data:
             for rule in self._routing_rules:
-                path = rule(triage_data)
+                path = rule.match(triage_data)
                 if path:
-                    # Validate all nodes exist
                     valid = all(nid in self._nodes for nid in path)
                     if valid:
                         task.path = path
                         task.metadata["routing"] = "deterministic"
+                        task.metadata["routing_rule"] = rule.name
+                        task.metadata["routing_rule_desc"] = rule.description
                         task.metadata["triage"] = triage_data
-                        logger.info(f"Rule-routed: {' → '.join(path)}")
+                        logger.info(
+                            f"Rule '{rule.name}' matched: {' → '.join(path)}"
+                        )
                         return task
 
         # Step 3: Try capability matching
