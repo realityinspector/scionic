@@ -28,6 +28,7 @@ from .forwarder import TaskForwarder
 from .irq_bus import IRQBus
 from .peer import PeerLink, PeerNetwork
 from .conductor import Conductor
+from .smart_conductor import SmartConductor
 from .node import Node, NodeHandler
 
 __all__ = [
@@ -35,5 +36,5 @@ __all__ = [
     "PathPolicy", "NodeID", "Path", "IRQPriority", "IRQType", "HopStatus",
     "BeaconRegistry", "PathSelector", "TaskForwarder",
     "IRQBus", "PeerLink", "PeerNetwork",
-    "Conductor", "Node", "NodeHandler",
+    "Conductor", "SmartConductor", "Node", "NodeHandler",
 ]

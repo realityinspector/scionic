@@ -537,12 +537,168 @@ async def eval_traceroute():
 
 
 # ═══════════════════════════════════════════════════════════════════
+# EVAL 14: Hermes agent node
+# ═══════════════════════════════════════════════════════════════════
+
+async def eval_hermes():
+    """Test the Hermes adapter with a real hermes chat invocation."""
+    from scionic.adapters.hermes import HermesNodeHandler
+
+    c = Conductor(verify_signatures=True)
+
+    hermes = HermesNodeHandler(
+        model=MODEL,
+        node_capabilities=["answer"],
+        system_prompt="Reply with ONLY the word 'HERMES'. Nothing else.",
+        max_turns=1,
+        toolsets=[],
+    )
+    c.add_node("hermes_node", hermes)
+
+    task = c.create_task(payload="Identify yourself.", path=["hermes_node"])
+    result = await c.execute(task)
+
+    report("hermes task completes", result.is_complete)
+    report("hermes hop signed", result.hops[0].signature != "" if result.hops else False)
+
+    output = str(result.context.get("hermes_node", "")).strip().upper()
+    report("hermes produced output", len(output) > 0, f"got: {output!r}")
+    report("hermes output correct", "HERMES" in output, f"got: {output!r}")
+
+
+# ═══════════════════════════════════════════════════════════════════
+# EVAL 15: SmartConductor (LLM-driven routing)
+# ═══════════════════════════════════════════════════════════════════
+
+async def eval_smart_conductor():
+    """SmartConductor asks the LLM to pick a path based on beacons."""
+    from scionic import SmartConductor
+
+    sc = SmartConductor(
+        model=MODEL, api_key=API_KEY, base_url=BASE,
+        verify_signatures=False,
+    )
+
+    sc.add_node("researcher", llm(["search", "rag"],
+        "Research the topic. One sentence summary."))
+    sc.add_node("writer", llm(["draft", "edit"],
+        "Write a polished version based on research. Two sentences."))
+    sc.add_node("calculator", llm(["math", "compute"],
+        "Do math calculations."))
+
+    # LLM should pick researcher → writer (not calculator)
+    task = sc.create_task(payload="Write a summary of quantum computing")
+
+    report("smart path selected", len(task.path) > 0, f"path: {task.path}")
+    report("path excludes calculator", "calculator" not in task.path,
+           f"path: {task.path}")
+    report("path includes writer", "writer" in task.path,
+           f"path: {task.path}")
+
+    result = await sc.execute(task)
+    report("smart execution completes", result.is_complete)
+    report("has output", any(len(str(v)) > 0 for k, v in result.context.items() if not k.startswith("_")))
+
+
+# ═══════════════════════════════════════════════════════════════════
+# EVAL 16: Transport serialization round-trip
+# ═══════════════════════════════════════════════════════════════════
+
+async def eval_transport():
+    """Serialize a completed task to JSON and back. Verify nothing is lost."""
+    from scionic.transport import (
+        LocalTransport, task_to_json, task_from_json, task_to_dict,
+    )
+
+    # First, create a real task with hops
+    c = Conductor()
+    c.add_node("a", llm(["step"], "Say 'alpha'."))
+    c.add_node("b", llm(["step"], "Say 'beta'."))
+
+    task = c.create_task(payload="test transport", path=["a", "b"])
+    result = await c.execute(task)
+
+    # Serialize to JSON
+    json_str = task_to_json(result)
+    report("serializes to JSON", len(json_str) > 0)
+
+    # Deserialize back
+    restored = task_from_json(json_str)
+    report("deserializes back", restored.id == result.id)
+    report("path preserved", restored.path == result.path)
+    report("hop count preserved", len(restored.hops) == len(result.hops),
+           f"original={len(result.hops)}, restored={len(restored.hops)}")
+    report("context preserved", "a" in restored.context and "b" in restored.context)
+    report("signatures preserved",
+           all(h.signature != "" for h in restored.hops))
+
+    # Test LocalTransport queue round-trip
+    transport = LocalTransport(serialize=True)
+    await transport.send("node_x", result)
+    received = await transport.receive("node_x")
+    report("queue round-trip", received.id == result.id)
+    report("queue preserves hops", len(received.hops) == len(result.hops))
+
+
+# ═══════════════════════════════════════════════════════════════════
+# EVAL 17: Code review pipeline end-to-end
+# ═══════════════════════════════════════════════════════════════════
+
+async def eval_code_review():
+    """Run the code review pipeline with real LLM calls on vulnerable code."""
+    c = Conductor(verify_signatures=True)
+
+    c.add_trust_domain("tooling", "Tooling", allowed_peers=["analysis"])
+    c.add_trust_domain("analysis", "Analysis", allowed_peers=["tooling"])
+
+    c.add_node("security", llm(["security"],
+        'Check this code for security issues. Respond with JSON: '
+        '{"severity": "none|low|medium|high|critical", "issues": ["..."]}. '
+        'ONLY the JSON, no markdown.',
+        max_tokens=256), trust_domain="tooling")
+
+    c.add_node("reviewer", llm(["review"],
+        "Review the code for correctness and style. 2-3 sentences.",
+        max_tokens=128), trust_domain="analysis")
+
+    c.add_node("approver", llm(["approve"],
+        'Based on security and review findings, decide. Respond with JSON: '
+        '{"approved": true|false, "reason": "one sentence"}. '
+        'ONLY the JSON, no markdown.',
+        max_tokens=64), trust_domain="analysis")
+
+    c.add_peer_link("security", "reviewer")
+
+    bad_code = 'query = f"SELECT * FROM users WHERE id = {user_input}"\nresult = eval(data)'
+
+    task = c.create_task(
+        payload=f"Review this code:\n```\n{bad_code}\n```",
+        path=["security", "reviewer", "approver"],
+    )
+    result = await c.execute(task)
+
+    report("pipeline completes", result.is_complete)
+    report("3 hops", len(result.hops) == 3, f"got {len(result.hops)}")
+    report("all hops signed", all(h.signature != "" for h in result.hops))
+    report("chain verifies",
+           all(h.verify(c._nodes[h.node_id].secret) for h in result.hops))
+
+    sec_output = str(result.context.get("security", "")).lower()
+    report("security found issues",
+           any(w in sec_output for w in ["sql", "injection", "eval", "high", "critical"]),
+           f"got: {sec_output[:100]}")
+
+    approver_output = str(result.context.get("approver", ""))
+    report("approver responded", len(approver_output) > 0, f"got: {approver_output[:100]}")
+
+
+# ═══════════════════════════════════════════════════════════════════
 # Runner
 # ═══════════════════════════════════════════════════════════════════
 
 async def main():
     print("=" * 70)
-    print("  scionic rapid eval — every feature, real LLM calls, no mocks")
+    print("  scionic rapid eval — every feature, real API calls, no mocks")
     print(f"  Model: {MODEL} via OpenRouter")
     print("=" * 70)
 
@@ -560,6 +716,10 @@ async def main():
         ("11. IRQ retry with feedback", eval_irq_retry),
         ("12. Full 4-node pipeline", eval_full_pipeline),
         ("13. Traceroute readability", eval_traceroute),
+        ("14. Hermes agent node", eval_hermes),
+        ("15. SmartConductor LLM routing", eval_smart_conductor),
+        ("16. Transport serialization", eval_transport),
+        ("17. Code review pipeline", eval_code_review),
     ]
 
     for name, fn in evals:

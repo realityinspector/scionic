@@ -1,173 +1,201 @@
 # scionic
 
-Path-aware graph execution middleware. SCION-inspired routing primitives for agent orchestration.
+SCION-inspired path-aware graph execution middleware for agent orchestration.
 
-## What
+Takes the core ideas from [SCION](https://scion-architecture.net/) — the next-gen internet architecture — and applies them as a general-purpose agent routing protocol. Zero dependencies (stdlib only; `httpx` optional for LLM adapter).
 
-Takes the core ideas from [SCION](https://scion-architecture.net/) (the next-gen internet architecture) and applies them as a **general-purpose graph execution protocol**:
+## Features
 
-| SCION Concept | scionic | What It Does |
-|---------------|-------------|--------------|
-| Beaconing (PCBs) | `BeaconRegistry` | Nodes advertise capabilities; conductor discovers what's available |
-| Path selection | `PathSelector` | Caller chooses the route based on cost, latency, trust, capability |
-| Packet-carried state | `Task` | The task carries its own route + accumulated context from each hop |
-| Hop fields | `Hop` (signed) | Each node signs its contribution — cryptographic execution proof |
-| Traceroute | `task.traceroute()` | Live execution trace emerges from hop log |
-| ISDs (trust domains) | `TrustDomain` | Isolation boundaries — failures/access don't cascade |
-| Peering links | `PeerNetwork` | Direct node-to-node messaging that bypasses the conductor |
-| **IRQ interrupts** | `IRQBus` | Any node can signal others async — "the premise changed, stop" |
-
-## Why Not LangGraph / CrewAI / AutoGen
-
-Those are all **tree-shaped orchestrators**: parent spawns children, children report back. No lateral communication, no path awareness, no graph.
-
-scionic gives you:
-- **Caller-chosen paths** — the sender decides the route, not the framework
-- **Verifiable execution** — each hop is signed, producing an auditable trace
-- **Lateral messaging** — agents peer directly without routing through the orchestrator
-- **Async interrupts** — any node can fire an IRQ that propagates across the graph
-- **Multi-path execution** — same task, multiple paths, compare results
-- **No central orchestrator bottleneck** — tasks carry their own route
+| Feature | What It Does |
+|---------|--------------|
+| **Packet-carried state** | Tasks carry their own route + accumulated context through the graph |
+| **Hop signing** | Each node cryptographically signs its contribution — verifiable execution proof |
+| **Traceroute** | Live execution trace with timing, tokens, and cost per hop |
+| **Path selection** | Caller chooses the route by capability, cost, latency, or trust domain |
+| **Multi-path** | Same task, multiple paths, parallel execution — compare results |
+| **IRQ interrupts** | Any node can signal others async; conductor masks by priority |
+| **IRQ retry** | Conductor re-executes failed hops with feedback injected |
+| **Peer messaging** | Direct node-to-node context sharing that bypasses the conductor |
+| **Trust domains** | Isolation boundaries — cross-domain hops blocked without peering |
+| **Reroute on failure** | Conductor auto-finds alternate node with same capability |
+| **SmartConductor** | LLM-driven routing — model reads beacons and assembles paths |
+| **Transport layer** | JSON serialization + async queues for distributed nodes |
 
 ## Quick Start
 
 ```bash
 pip install -e .
-python examples/research_pipeline.py
-```
-
-Output:
-```
-DEMO 1: Basic Pipeline with Traceroute
-Task 0528ed3e traceroute:
-  [+] 1. researcher (101ms)
-  [+] 2. analyst (151ms)
-  [+] 3. writer (101ms)
-```
-
-## Usage
-
-```python
-import asyncio
-from scionic import Conductor, PathPolicy
-
-conductor = Conductor()
-
-# Register nodes with capabilities
-conductor.add_node("researcher", ResearcherHandler(),
-                   cost_per_call=0.01, avg_latency_ms=100)
-conductor.add_node("analyst", AnalystHandler(),
-                   cost_per_call=0.02, avg_latency_ms=150)
-conductor.add_node("writer", WriterHandler(),
-                   cost_per_call=0.03, avg_latency_ms=100)
-
-# Peer links for lateral messaging
-conductor.add_peer_link("researcher", "analyst")
-
-# Auto-select path by capabilities
-task = conductor.create_task(
-    payload="Research topic X",
-    required_capabilities=["search", "analyze", "draft"],
-    policy=PathPolicy(prefer_low_cost=True),
-)
-
-# Or specify path explicitly
-task = conductor.create_task(
-    payload="Research topic X",
-    path=["researcher", "analyst", "writer"],
-)
-
-# Execute and inspect
-result = asyncio.run(conductor.execute(task))
-print(result.traceroute())
-print(result.context["writer"])  # Final output
-```
-
-## Adapters
-
-### Hermes Agent
-
-```python
-from scionic import Conductor
-from scionic.adapters import HermesAdapter
-
-conductor = Conductor()
-adapter = HermesAdapter(conductor)
-
-adapter.add_agent("researcher",
-    capabilities=["search", "rag"],
-    model="anthropic/claude-sonnet-4-6",
-    system_prompt="You are a research specialist.")
-
-adapter.add_agent("writer",
-    capabilities=["draft", "edit"],
-    model="anthropic/claude-opus-4-6",
-    system_prompt="You are a technical writer.")
-```
-
-### Generic LLM (OpenRouter / Ollama / any OpenAI-compatible)
-
-```python
-from scionic.adapters import LLMNodeHandler
-
-handler = LLMNodeHandler(
-    model="anthropic/claude-sonnet-4-6",
-    api_key="sk-or-...",
-    base_url="https://openrouter.ai/api/v1",
-    node_capabilities=["analyze"],
-    system_prompt="You are an analyst.",
-)
-conductor.add_node("analyst", handler)
-```
-
-## IRQ Interrupts
-
-```python
-from scionic import IRQType, IRQPriority
-
-# Any node can fire an interrupt
-await conductor.fire_irq(
-    source="analyst",
-    irq_type=IRQType.PREMISE_INVALID,
-    reason="Competitor was acquired — reframe analysis",
-    task=task,
-    priority=IRQPriority.HIGH,
-)
-
-# Conductor can mask low-priority IRQs per task
-conductor.irq_bus.mask(task.id, IRQPriority.LOW)
+python tests/eval.py    # 62+ assertions, real OpenRouter API calls, no mocks
 ```
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────┐
-│              Conductor                           │
-│  BeaconRegistry · PathSelector · IRQBus          │
-├─────────────────────────────────────────────────┤
-│              TaskForwarder                       │
-│  Routes tasks hop-by-hop along their path        │
-├─────────────────────────────────────────────────┤
-│              Nodes                               │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐      │
-│  │researcher│←→│ analyst  │  │  writer  │      │
-│  │  (search)│  │(analyze) │  │  (draft) │      │
-│  └──────────┘  └──────────┘  └──────────┘      │
-│       peer link ───┘                             │
-├─────────────────────────────────────────────────┤
-│              Adapters                            │
-│  Hermes · LLM (OpenRouter) · Custom              │
-└─────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────┐
+│  SmartConductor (LLM-driven) or Conductor (deterministic)│
+│  BeaconRegistry · PathSelector · IRQBus · PeerNetwork    │
+├──────────────────────────────────────────────────────────┤
+│  TaskForwarder (hop verification + trust domain checks)  │
+├──────────────────────────────────────────────────────────┤
+│  Nodes                                                   │
+│  ┌────────┐  ┌──────────┐  ┌────────┐  ┌────────────┐  │
+│  │ linter │←→│ reviewer │  │ writer │  │ approver   │  │
+│  │(Hermes)│  │  (LLM)   │  │ (LLM)  │  │   (LLM)    │  │
+│  └────────┘  └──────────┘  └────────┘  └────────────┘  │
+│     peer link ───┘                                       │
+├──────────────────────────────────────────────────────────┤
+│  Transport: LocalTransport (queues) | Redis | WebSocket  │
+├──────────────────────────────────────────────────────────┤
+│  Adapters: Hermes Agent | LLM (OpenRouter) | Custom      │
+└──────────────────────────────────────────────────────────┘
 ```
 
-## Beyond Agents
+## Usage
 
-The protocol is transport- and domain-agnostic. The same primitives work for:
+### Basic pipeline
 
-- **Data pipelines** — ETL stages as nodes, with path selection by cost/latency
-- **Payment routing** — choose routes by fee, jurisdiction, counterparty trust
-- **Supply chain** — verified intermediaries with cryptographic hop signing
-- **Mesh/IoT** — packet-carried state means no routing tables on constrained devices
+```python
+from scionic import Conductor
+from scionic.adapters.llm import LLMNodeHandler
+
+conductor = Conductor()
+conductor.add_node("researcher", LLMNodeHandler(
+    model="anthropic/claude-haiku-4.5", api_key="sk-or-...",
+    node_capabilities=["search"], system_prompt="You research topics."))
+conductor.add_node("writer", LLMNodeHandler(
+    model="anthropic/claude-haiku-4.5", api_key="sk-or-...",
+    node_capabilities=["draft"], system_prompt="You write reports."))
+
+task = conductor.create_task(
+    payload="Write about SCION networking",
+    path=["researcher", "writer"],
+)
+result = await conductor.execute(task)
+print(result.traceroute())
+print(result.context["writer"])
+```
+
+### SmartConductor (LLM picks the path)
+
+```python
+from scionic import SmartConductor
+
+conductor = SmartConductor(
+    model="anthropic/claude-haiku-4.5",
+    api_key="sk-or-...",
+)
+# Register nodes...
+task = conductor.create_task(payload="Review this code for security issues")
+# LLM reads beacons and decides: security_scanner → reviewer → approver
+result = await conductor.execute(task)
+```
+
+### Hermes nodes (agents with tools)
+
+```python
+from scionic.adapters.hermes import HermesAdapter
+
+adapter = HermesAdapter(conductor)
+adapter.add_agent("coder",
+    capabilities=["code", "terminal"],
+    system_prompt="You write and test code.",
+    toolsets=["terminal", "file"],
+    max_turns=5)
+```
+
+### Trust domains
+
+```python
+conductor.add_trust_domain("internal", "Internal", allowed_peers=["dmz"])
+conductor.add_trust_domain("dmz", "DMZ", allowed_peers=["internal"])
+conductor.add_trust_domain("external", "External")  # isolated
+
+conductor.add_node("secure", handler, trust_domain="internal")
+conductor.add_node("gateway", handler, trust_domain="dmz")
+conductor.add_node("untrusted", handler, trust_domain="external")
+
+# internal → dmz: OK (peered)
+# internal → external: BLOCKED (no peering)
+```
+
+### IRQ retry with feedback
+
+```python
+from scionic import IRQType, IRQPriority
+
+# After execution, request a retry with feedback
+await conductor.request_retry(
+    task=result,
+    source="reviewer",
+    target="writer",
+    feedback="Mention golden retrievers specifically.",
+)
+result = await conductor.execute_with_retry(result)
+```
+
+### Transport (distributed nodes)
+
+```python
+from scionic.transport import LocalTransport, task_to_json, task_from_json
+
+transport = LocalTransport(serialize=True)  # JSON round-trip
+await transport.send("node_b", task)
+received = await transport.receive("node_b")  # Deserialized from JSON
+```
+
+## Code Review Pipeline (Example App)
+
+```bash
+python examples/code_review.py
+```
+
+Routes code through: linter (Hermes) → security scanner → code reviewer → approval gate. With trust domains, peer messaging, and full traceroute.
+
+## Eval
+
+```bash
+python tests/eval.py
+```
+
+13 scenarios, 62+ assertions, all real OpenRouter API calls:
+
+1. Basic forwarding + hop signing
+2. Context accumulation across hops
+3. Auto path selection by capability + cost
+4. Multi-path parallel execution
+5. IRQ interrupt propagation
+6. IRQ masking
+7. Peer context injection
+8. Trust domain enforcement
+9. Hop signature verification (tampered sig detection)
+10. Reroute on failure
+11. IRQ retry with feedback injection
+12. Full 4-node pipeline with peer hints + signature chain
+13. Traceroute readability
+14. Hermes agent node
+15. SmartConductor LLM routing
+16. Transport serialization round-trip
+17. Code review pipeline end-to-end
+
+## Package Structure
+
+```
+scionic/
+├── __init__.py           # Public API
+├── types.py              # Task, Hop, Beacon, IRQ, PeerMessage, TrustDomain
+├── registry.py           # BeaconRegistry — capability discovery
+├── path_selector.py      # PathSelector — route assembly
+├── node.py               # Node — hop signing, peer injection
+├── forwarder.py          # TaskForwarder — verification, trust domains
+├── irq_bus.py            # IRQBus — async interrupts with masking
+├── peer.py               # PeerNetwork — lateral messaging
+├── conductor.py          # Conductor — deterministic orchestration
+├── smart_conductor.py    # SmartConductor — LLM-driven routing
+├── transport.py          # Serialization + async queue transport
+└── adapters/
+    ├── hermes.py         # Hermes Agent (tools, terminal, memory)
+    └── llm.py            # Any OpenAI-compatible API
+```
 
 ## License
 

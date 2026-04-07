@@ -1,21 +1,15 @@
 """
 Hermes Adapter — maps Hermes Agent to scionic nodes.
 
-Wraps Hermes's delegate_tool (subagent spawning) as node instantiation,
-maps Hermes's tool registry to beacon capabilities, and uses Hermes's
-gateway as the inter-node transport layer.
-
-This adapter allows a Conductor to orchestrate Hermes agents as
-graph nodes with full SCION-style path selection, hop signing,
-and IRQ propagation.
+Unlike the LLM adapter (raw API calls), Hermes nodes have tools:
+terminal, file I/O, web search, code execution. A Hermes node can
+*do things*, not just *say things*.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import subprocess
-import sys
 from typing import Any, Optional
 
 from ..types import Hop, Task
@@ -27,29 +21,32 @@ class HermesNodeHandler:
     """
     A scionic NodeHandler backed by a Hermes agent invocation.
 
-    Each call to `process()` spawns a Hermes chat session with the
-    task payload as the prompt, using the configured model.
+    Each call to `process()` spawns a Hermes chat session via
+    `hermes chat -q <prompt> -Q --max-turns N`. The -Q flag gives
+    clean output for programmatic use.
 
-    This maps directly to Hermes's delegate_tool pattern, but instead of
-    a tree-shaped parent→child delegation, it's a graph node that
-    receives tasks from any direction via the forwarder.
+    Hermes nodes can use tools (terminal, file, web) which makes them
+    fundamentally different from raw LLM nodes — they can execute code,
+    read files, search the web, etc.
     """
 
     def __init__(
         self,
-        model: str = "anthropic/claude-sonnet-4-6",
+        model: str = "anthropic/claude-haiku-4.5",
         hermes_bin: str = "hermes",
         node_capabilities: Optional[list[str]] = None,
         system_prompt: str = "",
-        max_iterations: int = 20,
+        max_turns: int = 5,
         toolsets: Optional[list[str]] = None,
+        timeout: int = 120,
     ) -> None:
         self.model = model
         self.hermes_bin = hermes_bin
         self._capabilities = node_capabilities or []
         self.system_prompt = system_prompt
-        self.max_iterations = max_iterations
+        self.max_turns = max_turns
         self.toolsets = toolsets or ["terminal", "file", "web"]
+        self.timeout = timeout
 
     def capabilities(self) -> list[str]:
         return list(self._capabilities)
@@ -58,33 +55,47 @@ class HermesNodeHandler:
         """
         Process a task by invoking Hermes as a subprocess.
 
-        Constructs a focused prompt from the task payload and
-        accumulated context from previous hops.
+        Uses -q for single query, -Q for quiet/programmatic output,
+        --max-turns to limit tool-call loops.
         """
         prompt = self._build_prompt(task)
 
-        logger.info(
-            f"Hermes node processing with model={self.model}: "
-            f"{prompt[:100]}..."
-        )
+        logger.info(f"Hermes node ({self.model}): {prompt[:80]}...")
+
+        cmd = [
+            self.hermes_bin, "chat",
+            "-q", prompt,
+            "-Q",  # Quiet mode: no banner/spinner, clean output
+            "-m", self.model,
+            "--max-turns", str(self.max_turns),
+        ]
+        if self.toolsets:
+            cmd.extend(["-t", ",".join(self.toolsets)])
 
         try:
             result = subprocess.run(
-                [
-                    self.hermes_bin,
-                    "chat",
-                    "--model", self.model,
-                    "--non-interactive",
-                    "--message", prompt,
-                ],
+                cmd,
                 capture_output=True,
                 text=True,
-                timeout=300,
+                timeout=self.timeout,
             )
+
             output = result.stdout.strip()
-            if result.returncode != 0:
-                logger.error(f"Hermes error: {result.stderr}")
-                raise RuntimeError(f"Hermes exited with code {result.returncode}: {result.stderr[:200]}")
+
+            # Strip the session_id line that hermes appends
+            lines = output.split("\n")
+            clean_lines = [
+                l for l in lines
+                if not l.startswith("session_id:")
+            ]
+            output = "\n".join(clean_lines).strip()
+
+            if result.returncode != 0 and not output:
+                stderr = result.stderr.strip()
+                raise RuntimeError(
+                    f"Hermes exited {result.returncode}: {stderr[:200]}"
+                )
+
             return output
 
         except FileNotFoundError:
@@ -93,7 +104,9 @@ class HermesNodeHandler:
                 f"Install from https://github.com/NousResearch/hermes-agent"
             )
         except subprocess.TimeoutExpired:
-            raise RuntimeError("Hermes agent timed out after 300s")
+            raise RuntimeError(
+                f"Hermes agent timed out after {self.timeout}s"
+            )
 
     def _build_prompt(self, task: Task) -> str:
         """Build a focused prompt from task payload and hop context."""
@@ -104,15 +117,24 @@ class HermesNodeHandler:
 
         parts.append(f"TASK: {task.payload}")
 
-        # Include context from previous hops (traceroute-style)
+        # Include context from previous hops
         if task.context:
-            parts.append("\nCONTEXT FROM PREVIOUS STEPS:")
+            context_parts = []
             for node_id, output in task.context.items():
-                # Truncate long outputs
+                if node_id.startswith("_"):
+                    continue  # Skip internal keys
                 output_str = str(output)
                 if len(output_str) > 2000:
                     output_str = output_str[:2000] + "... (truncated)"
-                parts.append(f"\n[{node_id}]:\n{output_str}")
+                context_parts.append(f"[{node_id}]: {output_str}")
+            if context_parts:
+                parts.append("\nCONTEXT FROM PREVIOUS STEPS:")
+                parts.extend(context_parts)
+
+        # Include feedback if retrying
+        feedback_key = f"_feedback_for_{task.current_node}"
+        if feedback_key in task.context:
+            parts.append(f"\nFEEDBACK (incorporate this): {task.context[feedback_key]}")
 
         parts.append(
             "\nProvide a clear, concise result. "
@@ -127,30 +149,12 @@ class HermesAdapter:
     High-level adapter for wiring Hermes agents into a Conductor.
 
     Usage:
-        from scionic import Conductor
-        from scionic.adapters import HermesAdapter
-
         conductor = Conductor()
         adapter = HermesAdapter(conductor)
-
-        adapter.add_agent(
-            "researcher",
-            capabilities=["search", "rag"],
-            model="anthropic/claude-sonnet-4-6",
-            system_prompt="You are a research specialist.",
-        )
-        adapter.add_agent(
-            "writer",
-            capabilities=["draft", "edit"],
-            model="anthropic/claude-opus-4-6",
-            system_prompt="You are a technical writer.",
-        )
-
-        task = conductor.create_task(
-            "Write a report on SCION",
-            required_capabilities=["search", "draft"],
-        )
-        result = await conductor.execute(task)
+        adapter.add_agent("researcher", capabilities=["search", "rag"],
+                          system_prompt="You are a research specialist.")
+        adapter.add_agent("coder", capabilities=["code", "terminal"],
+                          toolsets=["terminal", "file"])
     """
 
     def __init__(self, conductor, hermes_bin: str = "hermes") -> None:
@@ -161,11 +165,13 @@ class HermesAdapter:
         self,
         node_id: str,
         capabilities: list[str],
-        model: str = "anthropic/claude-sonnet-4-6",
+        model: str = "anthropic/claude-haiku-4.5",
         system_prompt: str = "",
         trust_domain: str = "default",
         cost_per_call: float = 0.0,
         avg_latency_ms: float = 5000.0,
+        max_turns: int = 5,
+        toolsets: Optional[list[str]] = None,
     ) -> None:
         """Add a Hermes-backed agent as a graph node."""
         handler = HermesNodeHandler(
@@ -173,6 +179,8 @@ class HermesAdapter:
             hermes_bin=self.hermes_bin,
             node_capabilities=capabilities,
             system_prompt=system_prompt,
+            max_turns=max_turns,
+            toolsets=toolsets,
         )
         self.conductor.add_node(
             node_id=node_id,
