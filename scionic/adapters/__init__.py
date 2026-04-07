@@ -1,4 +1,4 @@
-"""Adapters for connecting scion-graph to external systems."""
+"""Adapters for connecting scionic to external systems."""
 
 from .hermes import HermesNodeHandler, HermesAdapter
 from .llm import LLMNodeHandler

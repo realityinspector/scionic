@@ -1,4 +1,4 @@
-# scion-graph
+# scionic
 
 Path-aware graph execution middleware. SCION-inspired routing primitives for agent orchestration.
 
@@ -6,7 +6,7 @@ Path-aware graph execution middleware. SCION-inspired routing primitives for age
 
 Takes the core ideas from [SCION](https://scion-architecture.net/) (the next-gen internet architecture) and applies them as a **general-purpose graph execution protocol**:
 
-| SCION Concept | scion-graph | What It Does |
+| SCION Concept | scionic | What It Does |
 |---------------|-------------|--------------|
 | Beaconing (PCBs) | `BeaconRegistry` | Nodes advertise capabilities; conductor discovers what's available |
 | Path selection | `PathSelector` | Caller chooses the route based on cost, latency, trust, capability |
@@ -21,7 +21,7 @@ Takes the core ideas from [SCION](https://scion-architecture.net/) (the next-gen
 
 Those are all **tree-shaped orchestrators**: parent spawns children, children report back. No lateral communication, no path awareness, no graph.
 
-scion-graph gives you:
+scionic gives you:
 - **Caller-chosen paths** — the sender decides the route, not the framework
 - **Verifiable execution** — each hop is signed, producing an auditable trace
 - **Lateral messaging** — agents peer directly without routing through the orchestrator
@@ -49,7 +49,7 @@ Task 0528ed3e traceroute:
 
 ```python
 import asyncio
-from scion_graph import Conductor, PathPolicy
+from scionic import Conductor, PathPolicy
 
 conductor = Conductor()
 
@@ -88,8 +88,8 @@ print(result.context["writer"])  # Final output
 ### Hermes Agent
 
 ```python
-from scion_graph import Conductor
-from scion_graph.adapters import HermesAdapter
+from scionic import Conductor
+from scionic.adapters import HermesAdapter
 
 conductor = Conductor()
 adapter = HermesAdapter(conductor)
@@ -108,7 +108,7 @@ adapter.add_agent("writer",
 ### Generic LLM (OpenRouter / Ollama / any OpenAI-compatible)
 
 ```python
-from scion_graph.adapters import LLMNodeHandler
+from scionic.adapters import LLMNodeHandler
 
 handler = LLMNodeHandler(
     model="anthropic/claude-sonnet-4-6",
@@ -123,7 +123,7 @@ conductor.add_node("analyst", handler)
 ## IRQ Interrupts
 
 ```python
-from scion_graph import IRQType, IRQPriority
+from scionic import IRQType, IRQPriority
 
 # Any node can fire an interrupt
 await conductor.fire_irq(

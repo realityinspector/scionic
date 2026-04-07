@@ -1,5 +1,5 @@
 """
-scion-graph: Path-aware graph execution middleware.
+scionic: Path-aware graph execution middleware.
 
 SCION-inspired routing primitives for agent orchestration, data pipelines,
 and any domain where messages traverse a graph with sender-chosen,

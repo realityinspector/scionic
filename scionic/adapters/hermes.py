@@ -1,5 +1,5 @@
 """
-Hermes Adapter — maps Hermes Agent to scion-graph nodes.
+Hermes Adapter — maps Hermes Agent to scionic nodes.
 
 Wraps Hermes's delegate_tool (subagent spawning) as node instantiation,
 maps Hermes's tool registry to beacon capabilities, and uses Hermes's
@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 class HermesNodeHandler:
     """
-    A scion-graph NodeHandler backed by a Hermes agent invocation.
+    A scionic NodeHandler backed by a Hermes agent invocation.
 
     Each call to `process()` spawns a Hermes chat session with the
     task payload as the prompt, using the configured model.
@@ -127,8 +127,8 @@ class HermesAdapter:
     High-level adapter for wiring Hermes agents into a Conductor.
 
     Usage:
-        from scion_graph import Conductor
-        from scion_graph.adapters import HermesAdapter
+        from scionic import Conductor
+        from scionic.adapters import HermesAdapter
 
         conductor = Conductor()
         adapter = HermesAdapter(conductor)

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Example: Multi-agent research pipeline using scion-graph.
+Example: Multi-agent research pipeline using scionic.
 
 Demonstrates:
 - Path-aware routing through agent nodes
@@ -21,7 +21,7 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from scion_graph import (
+from scionic import (
     Conductor,
     IRQPriority,
     IRQType,
@@ -29,8 +29,8 @@ from scion_graph import (
     PeerMessage,
     Task,
 )
-from scion_graph.node import NodeHandler
-from scion_graph.types import Hop
+from scionic.node import NodeHandler
+from scionic.types import Hop
 
 logging.basicConfig(level=logging.INFO, format="%(name)s | %(message)s")
 logger = logging.getLogger("demo")
@@ -307,7 +307,7 @@ async def demo_multipath():
 
 async def main():
     print("╔══════════════════════════════════════════════════════════╗")
-    print("║  scion-graph: Path-Aware Agent Orchestration            ║")
+    print("║  scionic: Path-Aware Agent Orchestration            ║")
     print("║  SCION-inspired middleware for multi-agent systems      ║")
     print("╚══════════════════════════════════════════════════════════╝")
 

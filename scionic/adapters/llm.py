@@ -1,5 +1,5 @@
 """
-Generic LLM Adapter — maps any OpenAI-compatible API to a scion-graph node.
+Generic LLM Adapter — maps any OpenAI-compatible API to a scionic node.
 
 Uses the OpenAI client format (works with OpenRouter, Ollama, vLLM, etc.)
 so any model can be a graph node without requiring Hermes.
@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 class LLMNodeHandler:
     """
-    A scion-graph NodeHandler backed by a direct LLM API call.
+    A scionic NodeHandler backed by a direct LLM API call.
 
     Uses the OpenAI-compatible chat completions format, which works with:
     - OpenRouter (any model)

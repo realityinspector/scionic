@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Integration tests for scion-graph.
+Integration tests for scionic.
 
 These tests make REAL API calls to OpenRouter. No mocks.
 Requires OPENROUTER_API_KEY environment variable.
@@ -29,9 +29,9 @@ if not API_KEY:
     print("FATAL: No OPENROUTER_API_KEY found. Cannot run integration tests.")
     sys.exit(1)
 
-from scion_graph import Conductor, IRQPriority, IRQType, PathPolicy
-from scion_graph.adapters.llm import LLMNodeHandler
-from scion_graph.types import Hop, Task
+from scionic import Conductor, IRQPriority, IRQType, PathPolicy
+from scionic.adapters.llm import LLMNodeHandler
+from scionic.types import Hop, Task
 
 # Use haiku for speed and cost — this is testing the protocol, not the model
 MODEL = "anthropic/claude-haiku-4.5"
@@ -302,7 +302,7 @@ async def test_path_selection_with_real_nodes():
 
 async def main():
     print("=" * 60)
-    print("scion-graph integration tests (REAL API calls)")
+    print("scionic integration tests (REAL API calls)")
     print(f"Model: {MODEL}")
     print(f"API: OpenRouter")
     print("=" * 60)

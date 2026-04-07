@@ -1,5 +1,5 @@
 """
-Core data structures for scion-graph.
+Core data structures for scionic.
 
 These are the middleware primitives — transport-agnostic, adapter-agnostic.
 Network adapters (SCION, TCP) and agent adapters (Hermes, Claude, generic)
