@@ -157,25 +157,29 @@ Routes code through: linter (Hermes) → security scanner → code reviewer → 
 python tests/eval.py
 ```
 
-13 scenarios, 62+ assertions, all real OpenRouter API calls:
+21 scenarios, 70 assertions, all real OpenRouter API calls, no mocks:
 
-1. Basic forwarding + hop signing
-2. Context accumulation across hops
-3. Auto path selection by capability + cost
-4. Multi-path parallel execution
-5. IRQ interrupt propagation
+1. Single hop + signing
+2. Context flows between hops
+3. Path selection (cheapest)
+4. Multi-path parallel
+5. IRQ propagation
 6. IRQ masking
 7. Peer context injection
 8. Trust domain enforcement
-9. Hop signature verification (tampered sig detection)
-10. Reroute on failure
-11. IRQ retry with feedback injection
-12. Full 4-node pipeline with peer hints + signature chain
-13. Traceroute readability
-14. Hermes agent node
-15. SmartConductor LLM routing
-16. Transport serialization round-trip
-17. Code review pipeline end-to-end
+9. Domain capability restrictions
+10. Signature tamper detection
+11. Reroute on failure
+12. Review retry loop (execute_with_review)
+13. Batch execution (concurrent)
+14. Pipeline timeout
+15. FlowController + circuit breaker
+16. TriageRouter deterministic routing
+17. Routing rules introspection
+18. Transport serialization
+19. Hermes adapter
+20. Full 4-node pipeline
+21. Packaging (pip install)
 
 ## Package Structure
 

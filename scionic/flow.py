@@ -98,20 +98,16 @@ class NodePressure:
     Real-time pressure metrics for a node.
 
     Pressure = current_load / max_capacity. At 1.0, the node is full.
-    Above 1.0 means requests are queuing (shouldn't happen with flow control).
     """
     node_id: NodeID
     max_capacity: int = 1
     current_load: int = 0
-    # Latency tracking (rolling window)
     latency_window: deque = field(default_factory=lambda: deque(maxlen=20))
-    # Throughput tracking
     completed_count: int = 0
     started_at: float = field(default_factory=time.time)
 
     @property
     def pressure(self) -> float:
-        """0.0 = idle, 1.0 = full, >1.0 = overloaded."""
         if self.max_capacity <= 0:
             return float('inf')
         return self.current_load / self.max_capacity
@@ -158,8 +154,7 @@ class FlowController:
     Manages flow across the graph.
 
     Tracks pressure per node, manages circuit breakers, and provides
-    flow-aware node selection — pick the node with lowest pressure
-    among those with matching capabilities.
+    flow-aware node selection.
     """
 
     def __init__(
@@ -186,7 +181,6 @@ class FlowController:
         self._breakers.pop(node_id, None)
 
     def can_accept(self, node_id: NodeID) -> bool:
-        """Check if a node can accept a new task (capacity + circuit)."""
         pressure = self._pressure.get(node_id)
         breaker = self._breakers.get(node_id)
         if pressure is None or breaker is None:
@@ -209,24 +203,15 @@ class FlowController:
         if node_id in self._breakers:
             self._breakers[node_id].record_failure()
 
-    def select_by_pressure(
-        self, candidates: list[NodeID]
-    ) -> Optional[NodeID]:
-        """
-        From a list of candidate nodes, pick the one with lowest pressure
-        that can accept a request. Returns None if all are blocked.
-        """
+    def select_by_pressure(self, candidates: list[NodeID]) -> Optional[NodeID]:
         available = []
         for nid in candidates:
             if self.can_accept(nid):
                 pressure = self._pressure.get(nid)
                 if pressure:
                     available.append((nid, pressure.pressure))
-
         if not available:
             return None
-
-        # Sort by pressure (lowest first), break ties by node_id for determinism
         available.sort(key=lambda x: (x[1], x[0]))
         return available[0][0]
 
