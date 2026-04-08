@@ -7,7 +7,7 @@ name = "scionic"
 version = "0.2.0"
 description = "SCION-inspired path-aware graph execution middleware for agent orchestration."
 readme = "README.md"
-license = "MIT"
+license = {text = "MIT"}
 requires-python = ">=3.11"
 dependencies = []
 
