@@ -37,9 +37,14 @@ FAIL = 0
 T0 = time.time()
 
 
-def ok(name: str, cond: bool, detail: str = ""):
+def ok(name: str, cond, detail: str = ""):
     global PASS, FAIL
-    if cond:
+    try:
+        passed = bool(cond)
+    except Exception as e:
+        passed = False
+        detail = f"exception evaluating condition: {e}"
+    if passed:
         PASS += 1
         print(f"  PASS  {name}")
     else:
@@ -102,12 +107,21 @@ async def test_context_flows():
 
 async def test_path_selection():
     c = Conductor()
-    c.add_node("cheap", node(["summarize"], "Summarize."), cost_per_call=0.001)
-    c.add_node("pricey", node(["summarize"], "Summarize."), cost_per_call=0.10)
-    t = c.create_task(payload="test", required_capabilities=["summarize"],
-                      policy=PathPolicy(prefer_low_cost=True))
-    ok("picks cheap", t.path == ["cheap"], str(t.path))
-    r = await c.execute(t)
+    # cheap+slow vs expensive+fast
+    c.add_node("cheap", node(["summarize"], "Summarize."),
+               cost_per_call=0.001, avg_latency_ms=5000)
+    c.add_node("pricey", node(["summarize"], "Summarize."),
+               cost_per_call=0.10, avg_latency_ms=100)
+
+    t1 = c.create_task(payload="test", required_capabilities=["summarize"],
+                       policy=PathPolicy(prefer_low_cost=True, prefer_low_latency=False))
+    ok("cost policy picks cheap", t1.path == ["cheap"], str(t1.path))
+
+    t2 = c.create_task(payload="test", required_capabilities=["summarize"],
+                       policy=PathPolicy(prefer_low_latency=True, prefer_low_cost=False))
+    ok("latency policy picks fast", t2.path == ["pricey"], str(t2.path))
+
+    r = await c.execute(t1)
     ok("executes", r.is_complete)
 
 
@@ -284,10 +298,11 @@ async def test_review_retry():
     r = await c.execute_with_review(t, reviewer_node="reviewer",
                                     max_review_retries=1)
     ok("review loop ran", len(r.hops) >= 2, f"{len(r.hops)} hops")
-    # If reviewer rejected and retry happened, we should have > 2 hops
-    # (writer, reviewer, retry-writer, retry-reviewer)
-    ok("retry attempted", len(r.hops) > 2 or len(c._irq_log) > 0,
-       f"hops={len(r.hops)} irqs={len(c._irq_log)}")
+    # Retry should produce > 2 hops AND an IRQ in the log
+    ok("retry happened (>2 hops)", len(r.hops) > 2,
+       f"hops={len(r.hops)}")
+    ok("retry IRQ logged", len(c._irq_log) > 0,
+       f"irqs={len(c._irq_log)}")
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -315,7 +330,7 @@ async def test_timeout():
     c = Conductor(verify_signatures=False)
     c.add_node("slow", node(["work"], "Write 500 words.", max_tokens=512))
     ts = [c.create_task(payload="x", path=["slow"])]
-    rs = await c.execute_batch(ts, concurrency=1, timeout_per_task=0.001)
+    rs = await c.execute_batch(ts, concurrency=1, timeout_per_task=0.01)
     ok("returns despite timeout", len(rs) == 1)
     ok("timeout in hop error",
        any("timeout" in (h.error or "").lower() for h in rs[0].hops),
@@ -441,13 +456,13 @@ async def test_hermes():
 async def test_full_pipeline():
     c = Conductor(verify_signatures=True)
     c.add_node("triager", node(["triage"],
-        '{"priority":"high","type":"design"}', max_tokens=32))
+        "Classify the task type. One sentence.", max_tokens=32))
     c.add_node("planner", node(["plan"],
-        '{"subtasks":["design","implement"]}', max_tokens=64))
+        "Break task into 2 steps. Be brief.", max_tokens=64))
     c.add_node("executor", node(["execute"],
-        "Execute based on plan. 2 sentences.", max_tokens=128))
+        "Execute based on plan from previous steps. 2 sentences.", max_tokens=128))
     c.add_node("reviewer", node(["review"],
-        '{"approved":true,"quality":"good"}', max_tokens=32))
+        "Review the work. One sentence verdict.", max_tokens=32))
     c.add_peer_link("planner", "executor")
     await c.send_peer_message("planner", "executor",
                               payload="Focus on API design.")
@@ -478,17 +493,144 @@ async def test_packaging():
 
 
 # ═════════════════════════════════════════════════════════════════════
+# 22. Can a peer message cross a non-peered trust domain boundary?
+# ═════════════════════════════════════════════════════════════════════
+
+async def test_peer_cross_domain():
+    c = Conductor(verify_signatures=False)
+    c.add_trust_domain("zone_a", "Zone A")  # no peers
+    c.add_trust_domain("zone_b", "Zone B")  # no peers
+    c.add_node("a", node(["step"], "ok"), trust_domain="zone_a")
+    c.add_node("b", node(["step"], "ok"), trust_domain="zone_b")
+    # Peer link exists but domains aren't peered
+    c.add_peer_link("a", "b")
+    sent = await c.send_peer_message("a", "b", payload="cross-domain hint")
+    # Peer message should still deliver (peer links are transport-level,
+    # trust domains are forwarding-level). This tests the separation.
+    ok("peer msg delivered despite domain boundary", sent)
+
+
+# ═════════════════════════════════════════════════════════════════════
+# 23. Custom RoutingRule (not add_default_rules)
+# ═════════════════════════════════════════════════════════════════════
+
+async def test_custom_routing_rule():
+    tr = TriageRouter(triage_node_id="triager", verify_signatures=False)
+    tr.add_node("triager", node(["triage", "classify"],
+        'Classify. JSON only: {"complexity":"trivial","needs_code":false,'
+        '"needs_research":false,"needs_planning":false,"needs_terminal":false,'
+        '"custom_flag":"special"}', max_tokens=128))
+    tr.add_node("special", node(["special"], "Say SPECIAL.", max_tokens=8))
+    tr.add_node("fallback", node(["execute"], "Say FALLBACK.", max_tokens=8))
+
+    # Custom rule that checks a custom flag
+    tr.add_routing_rule(RoutingRule(
+        name="custom_special",
+        description="Routes to special node when custom_flag=special",
+        priority=5,
+        match=lambda t: ["special"] if t.get("custom_flag") == "special" else None,
+    ))
+    tr.add_routing_rule(RoutingRule(
+        name="catch_all",
+        description="Fallback",
+        priority=100,
+        match=lambda t: ["fallback"],
+    ))
+
+    t = await tr.create_task_routed(payload="Test custom routing")
+    ok("custom rule matched", t.metadata.get("routing_rule") == "custom_special",
+       f"got: {t.metadata.get('routing_rule')}")
+    ok("routed to special", t.path == ["special"], str(t.path))
+    r = await tr.execute(t)
+    ok("custom route executed", r.is_complete)
+
+
+# ═════════════════════════════════════════════════════════════════════
+# 24. execute_with_review on TriageRouter
+# ═════════════════════════════════════════════════════════════════════
+
+async def test_triage_review():
+    tr = TriageRouter(triage_node_id="triager", verify_signatures=False)
+    tr.add_node("triager", node(["triage", "classify"],
+        '{"complexity":"simple","needs_code":false,"needs_research":false,'
+        '"needs_planning":false,"needs_terminal":false}', max_tokens=64))
+    tr.add_node("quick_answer", node(["answer", "quick"],
+        "Answer briefly.", max_tokens=64))
+    tr.add_node("reviewer", node(["review"],
+        '{"approved":true,"feedback":"looks good"}', max_tokens=32))
+    tr.add_default_rules()
+    t = await tr.create_task_routed(payload="What is 1+1?")
+    # Append reviewer to the routed path (execute_with_review needs it in the path)
+    if "reviewer" not in t.path:
+        t.path.append("reviewer")
+    r = await tr.execute_with_review(t, reviewer_node="reviewer",
+                                     max_review_retries=1)
+    ok("triage+review completes", r.is_complete)
+    ok("reviewer ran", any(h.node_id == "reviewer" for h in r.hops),
+       f"hops: {[h.node_id for h in r.hops]}")
+
+
+# ═════════════════════════════════════════════════════════════════════
+# 25. Circuit breaker integration with real LLM failure
+# ═════════════════════════════════════════════════════════════════════
+
+async def test_circuit_breaker_live():
+    """TriageRouter with FlowController — fail a node, verify breaker trips."""
+    tr = TriageRouter(
+        triage_node_id="triager",
+        verify_signatures=False,
+        circuit_failure_threshold=2,
+        circuit_cooldown_seconds=60,
+    )
+    tr.add_node("triager", node(["triage"], '{"complexity":"trivial"}'))
+    tr.add_node("quick_answer", node(["answer", "quick"], "Answer."))
+    tr.add_node("broken", AlwaysFail())
+    tr.add_default_rules()
+
+    # Force two tasks through the broken node
+    for _ in range(2):
+        t = tr.create_task(payload="x", path=["broken"])
+        await tr.execute(t)
+
+    ok("breaker tripped",
+       tr.flow.get_breaker("broken").state == CircuitState.OPEN,
+       str(tr.flow.get_breaker("broken").state))
+    ok("broken node blocked", not tr.flow.can_accept("broken"))
+
+
+# ═════════════════════════════════════════════════════════════════════
+# 26. Task metadata persists through retry loops
+# ═════════════════════════════════════════════════════════════════════
+
+async def test_metadata_through_retry():
+    c = Conductor(verify_signatures=False)
+    c.add_node("worker", node(["execute"],
+        "Say done. Check for feedback.", max_tokens=32))
+    c.add_node("reviewer", node(["review"],
+        'ALWAYS reject: {"approved":false,"feedback":"add detail"}', max_tokens=64))
+    t = c.create_task(payload="test", path=["worker", "reviewer"], max_retries=1)
+    t.metadata["custom_key"] = "custom_value"
+    t.metadata["created_by"] = "test"
+    r = await c.execute_with_review(t, reviewer_node="reviewer",
+                                    max_review_retries=1)
+    ok("custom metadata survives", r.metadata.get("custom_key") == "custom_value",
+       str(r.metadata))
+    ok("created_by survives", r.metadata.get("created_by") == "test",
+       str(r.metadata))
+
+
+# ═════════════════════════════════════════════════════════════════════
 
 async def main():
     print("=" * 70)
-    print("  scionic eval — fresh, no mocks, real API calls")
+    print("  scionic eval — full coverage, no mocks, real API calls")
     print(f"  Model: {MODEL}")
     print("=" * 70)
 
     tests = [
         ("1.  Single hop + signing", test_single_hop),
         ("2.  Context flows between hops", test_context_flows),
-        ("3.  Path selection (cheapest)", test_path_selection),
+        ("3.  Path selection (cost + latency)", test_path_selection),
         ("4.  Multi-path parallel", test_multipath),
         ("5.  IRQ propagation", test_irq),
         ("6.  IRQ masking", test_irq_mask),
@@ -507,6 +649,11 @@ async def main():
         ("19. Hermes adapter", test_hermes),
         ("20. Full 4-node pipeline", test_full_pipeline),
         ("21. Packaging (pip install)", test_packaging),
+        ("22. Peer msg across domain boundary", test_peer_cross_domain),
+        ("23. Custom RoutingRule", test_custom_routing_rule),
+        ("24. TriageRouter + execute_with_review", test_triage_review),
+        ("25. Circuit breaker live integration", test_circuit_breaker_live),
+        ("26. Metadata survives retry", test_metadata_through_retry),
     ]
 
     for name, fn in tests:
